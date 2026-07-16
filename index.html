@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dungeon Reflex AR: ฝึกตอบสนอง 10 ด่าน</title>
+    <!-- MediaPipe Script สำหรับ Hands และ Camera -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <style>
+        /* สไตล์ UI แบบ Dungeon พิกเซลสีเขียวหม่น (Game Boy Color esque) */
+        @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+
+        :root {
+            --bg-color: #2f3e2f; /* เขียวเข้มหม่น พื้นดันเจี้ยน */
+            --wall-color: #1a1e1a; /* เขียวเกือบดำ กำแพง */
+            --light-color: #a7cda7; /* เขียวอ่อน คบเพลิง/ตัวหนังสือ */
+            --dark-color: #0f120f; /* ดำสนิท */
+            --health-color: #3e6d3e; /* แถบเลือด */
+            --ammo-color: #79a379; /* แถบกระสุน */
+            --danger-color: #c94f4f; /* แดงหม่น แจ้งเตือนอันตราย */
+            --gold-color: #cdae5a; /* ทองหม่น สำหรับคะแนน/รางวัล */
+            --pixel-font: 'Press Start 2P', monospace;
+        }
+
+        body, html {
+            margin: 0; padding: 0; width: 100%; height: 100%;
+            background-color: var(--dark-color);
+            overflow: hidden;
+            color: var(--light-color);
+            font-family: var(--pixel-font);
+            font-size: 14px;
+        }
+
+        #game-container {
+            position: relative;
+            width: 100%; height: 100vh;
+        }
+
+        #game-canvas {
+            width: 100%; height: 100%;
+            image-rendering: pixelated;
+            display: block;
+        }
+
+        /* ซ่อนวิดีโอจากกล้อง (ใช้เป็น input ของ MediaPipe เท่านั้น) */
+        #webcam {
+            position: absolute;
+            width: 1px; height: 1px;
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        #ui-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            display: flex; flex-direction: column;
+            justify-content: space-between;
+            pointer-events: none;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+
+        header {
+            display: flex; justify-content: space-between;
+            background-color: rgba(0,0,0,0.55);
+            padding: 8px 12px;
+            border: 2px solid var(--light-color);
+        }
+
+        footer {
+            display: flex; justify-content: space-between; align-items: flex-end;
+            background-color: rgba(0,0,0,0.55);
+            padding: 8px 12px;
+            border: 2px solid var(--light-color);
+        }
+
+        .bars-container { width: 55%; display: flex; flex-direction: column; gap: 6px; }
+        .bar-wrapper { display: flex; align-items: center; gap: 6px; }
+        .bar-label { width: 20px; font-size: 10px; }
+        .bar {
+            width: 100%; height: 12px;
+            border: 2px solid var(--light-color);
+            background-color: var(--dark-color);
+        }
+        #health-bar .bar-fill { height: 100%; background-color: var(--health-color); width: 100%; transition: width 0.2s; }
+        #ammo-bar .bar-fill { height: 100%; background-color: var(--ammo-color); width: 100%; transition: width 0.2s; }
+
+        #timer { font-size: 16px; }
+        #timer.low-time { color: var(--danger-color); animation: pulse 0.6s infinite; }
+
+        @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.4;} }
+
+        /* หน้าจอ overlay ต่างๆ */
+        #reward-screen, #game-over-screen, #start-screen, #level-intro-screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background-color: rgba(5,8,5,0.88);
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            gap: 20px; text-align: center;
+            border: 5px solid var(--light-color);
+            box-sizing: border-box;
+            color: var(--light-color);
+            padding: 20px;
+        }
+
+        button {
+            padding: 15px 25px;
+            background-color: var(--wall-color);
+            color: var(--light-color);
+            border: 2px solid var(--light-color);
+            font-family: var(--pixel-font);
+            font-size: 13px;
+            cursor: pointer;
+            pointer-events: auto;
+            text-transform: uppercase;
+        }
+        button:hover { background-color: var(--health-color); }
+        .hidden { display: none !important; }
+
+        #hand-warning {
+            position: absolute;
+            top: 55px; left: 50%; transform: translateX(-50%);
+            background: rgba(201,79,79,0.85);
+            border: 2px solid var(--light-color);
+            padding: 8px 14px;
+            font-size: 11px;
+            display: none;
+        }
+
+        #line-p, .subtext { font-size: 11px; line-height: 1.8; }
+        .gold { color: var(--gold-color); }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <video id="webcam" autoplay playsinline muted></video>
+    <canvas id="game-canvas"></canvas>
+
+    <!-- หน้าจอเริ่มเกม -->
+    <div id="start-screen">
+        <h1>Dungeon Reflex AR</h1>
+        <p class="subtext">ฝึกตอบสนองผ่าน 10 ด่าน<br>ขยับมือ <span class="gold">ซ้าย / กลาง / ขวา</span> เพื่อเล็งยิงศัตรู<br>และหลบเมื่อศัตรูเตรียมโจมตี!</p>
+        <p class="subtext" style="color: grey;">(ต้องอนุญาตกล้อง และมีพื้นที่ให้ขยับมือหน้ากล้อง)</p>
+        <button id="start-btn">เริ่มเกม</button>
+    </div>
+
+    <!-- UI หลัก -->
+    <div id="ui-overlay" class="hidden">
+        <div id="hand-warning">⚠ ไม่พบมือ! ยกมือให้อยู่ในกล้อง</div>
+        <header>
+            <div>LVL: <span id="level-display">0</span>/10</div>
+            <div>SCORE: <span id="score-display">0</span></div>
+        </header>
+
+        <footer>
+            <div class="bars-container">
+                <div class="bar-wrapper" id="health-bar">
+                    <span class="bar-label">+</span>
+                    <div class="bar"><div class="bar-fill"></div></div>
+                </div>
+                <div class="bar-wrapper" id="ammo-bar">
+                    <span class="bar-label">=</span>
+                    <div class="bar"><div class="bar-fill"></div></div>
+                </div>
+            </div>
+            <div id="timer">T: <span id="time-left">60</span>s</div>
+        </footer>
+    </div>
+
+    <!-- หน้าจอรางวัล -->
+    <div id="reward-screen" class="hidden">
+        <h2>ผ่านด่าน <span id="reward-level"></span> แล้ว!</h2>
+        <p class="subtext">เลือกรางวัลก่อนไปด่านต่อไป</p>
+        <button id="reward-health">❤ เลือด +50</button>
+        <button id="reward-ammo">➤ กระสุน +10</button>
+    </div>
+
+    <!-- หน้าจอเกมโอเวอร์ -->
+    <div id="game-over-screen" class="hidden">
+        <h2 style="color: #c94f4f;">พ่ายแพ้!</h2>
+        <p id="game-over-msg" class="subtext">ไม่สามารถเอาชนะในเวลาที่กำหนด...</p>
+        <p class="subtext">คะแนนสูงสุด: <span id="final-score" class="gold">0</span></p>
+        <button id="restart-btn">เริ่มใหม่ตั้งแต่ด่าน 1</button>
+    </div>
+
+    <!-- หน้าจอชนะเกม -->
+    <div id="win-screen" class="hidden" style="position:absolute;top:0;left:0;width:100%;height:100%;background:rgba(5,8,5,0.92);display:flex;flex-direction:column;justify-content:center;align-items:center;gap:20px;text-align:center;border:5px solid var(--light-color);box-sizing:border-box;color:var(--light-color);">
+        <h1 class="gold">พิชิตดันเจี้ยนสำเร็จ!</h1>
+        <p class="subtext">คะแนนรวมทั้งหมด: <span id="win-score" class="gold">0</span></p>
+        <button id="restart-btn-win">เล่นใหม่อีกครั้ง</button>
+    </div>
+</div>
+
+<script type="module">
+    // ==================== CONFIG ====================
+    const TOTAL_LEVELS = 10;
+    const TIME_LIMIT_PER_LEVEL = 60; // วินาที
+    const PLAYER_MAX_HEALTH = 100;
+    const PLAYER_MAX_AMMO = 20;
+
+    const ENEMY_BASE_HP   = [30, 50, 70, 90, 110, 130, 150, 170, 190, 210];
+    const SCORE_PER_KILL  = [100, 150, 200, 250, 300, 400, 500, 600, 750, 1000];
+    const ENEMY_DAMAGE    = [5, 7, 9, 11, 13, 15, 17, 19, 22, 25]; // ดาเมจที่ผู้เล่นโดนถ้าหลบไม่ทัน
+    const TELEGRAPH_MS_BASE = 900; // เวลาที่ศัตรูเตือนก่อนโจมตี (ms), ยิ่งด่านสูงยิ่งไว
+    const HIT_DAMAGE_TO_ENEMY = 12;
+
+    const BG_COLOR = '#2f3e2f';
+    const WALL_COLOR = '#1a1e1a';
+    const LIGHT_COLOR = '#a7cda7';
+    const DANGER_COLOR = '#c94f4f';
+    const GOLD_COLOR = '#cdae5a';
+
+    // โซนขยับมือ (normalized 0-1), มีการ mirror ให้ความรู้สึกเหมือนกระจก
+    const ZONE_BOUNDARY_LEFT = 0.33;
+    const ZONE_BOUNDARY_RIGHT = 0.66;
+    const MIRROR_X = true;
+
+    // ==================== DOM ====================
+    const videoElement = document.getElementById('webcam');
+    const gameCanvas = document.getElementById('game-canvas');
+    const startScreen = document.getElementById('start-screen');
+    const uiOverlay = document.getElementById('ui-overlay');
+    const rewardScreen = document.getElementById('reward-screen');
+    const gameOverScreen = document.getElementById('game-over-screen');
+    const winScreen = document.getElementById('win-screen');
+    const handWarning = document.getElementById('hand-warning');
+
+    const levelDisplay = document.getElementById('level-display');
+    const scoreDisplay = document.getElementById('score-display');
+    const healthBarFill = document.querySelector('#health-bar .bar-fill');
+    const ammoBarFill = document.querySelector('#ammo-bar .bar-fill');
+    const timeLeftDisplay = document.getElementById('time-left');
+    const timerEl = document.getElementById('timer');
+
+    const ctx = gameCanvas.getContext('2d');
+
+    // ==================== GAME STATE ====================
+    let gameState = 'init'; // init, start, playing, reward, gameover, win
+    let level = 0;
+    let score = 0;
+    let playerHealth = PLAYER_MAX_HEALTH;
+    let playerAmmo = PLAYER_MAX_AMMO;
+    let enemy = null;
+    let timeLeft = TIME_LIMIT_PER_LEVEL;
+    let timerInterval = null;
+    let targetZone = 'middle'; // โซนที่มือผู้เล่นชี้อยู่ตอนนี้
+    let lastShootTime = 0;
+    let shootDelay = 450; // ms ระหว่างการยิงอัตโนมัติแต่ละนัด
+
+    let lastHandSeenAt = 0;
+    let shootFlashTimer = 0;   // เอฟเฟกต์แสงยิง
+    let hurtFlashTimer = 0;    // เอฟเฟกต์แดงตอนโดนตี
+    let rafHandle = null;
+
+    let dungeonTextureCanvas = null; // แคชลายพื้นดันเจี้ยน ไม่ต้องสุ่มวาดใหม่ทุกเฟรม
+
+    // ==================== AUDIO (WebAudio, ไม่ใช้ไฟล์เสียงภายนอก) ====================
+    let audioCtx = null;
+    function ensureAudio() {
+        if (!audioCtx) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+    }
+    function beep(freq = 440, duration = 0.1, type = 'square', vol = 0.15) {
+        if (!audioCtx) return;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = type;
+        osc.frequency.value = freq;
+        gain.gain.value = vol;
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
+        osc.stop(audioCtx.currentTime + duration);
+    }
+    const sfx = {
+        shoot: () => beep(880, 0.05, 'square', 0.08),
+        hit: () => beep(660, 0.08, 'square', 0.12),
+        kill: () => beep(1200, 0.15, 'triangle', 0.15),
+        hurt: () => beep(180, 0.25, 'sawtooth', 0.18),
+        telegraph: () => beep(300, 0.08, 'sine', 0.1),
+        levelUp: () => beep(520, 0.25, 'triangle', 0.15),
+        lose: () => beep(120, 0.5, 'sawtooth', 0.18),
+        win: () => beep(700, 0.4, 'triangle', 0.18),
+    };
+
+    // ==================== MediaPipe Hands Setup ====================
+    const hands = new Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+    hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.7
+    });
+
+    // ==================== Enemy Class ====================
+    class Enemy {
+        constructor(levelIdx) {
+            this.level = levelIdx;
+            this.hp = ENEMY_BASE_HP[levelIdx];
+            this.maxHp = this.hp;
+            this.emojis = ['🦑', '💀', '🧛‍♂️', '🦇', '🎃', '🧙‍♂️', '👹', '👺', '🔥', '👑'];
+            this.sprite = this.emojis[levelIdx % this.emojis.length];
+
+            this.zones = ['left', 'middle', 'right'];
+            this.zoneIdx = Math.floor(Math.random() * 3);
+            this.zone = this.zones[this.zoneIdx];
+            this.moveTimer = (Math.random() * 1200 + 900);
+
+            // ระบบโจมตี (telegraph -> resolve)
+            this.attackState = 'none'; // none | telegraph
+            this.attackCooldown = 1800 + Math.random() * 1200; // เวลาก่อนเริ่มเตือนโจมตีครั้งแรก
+            this.telegraphTimer = 0;
+            this.telegraphDuration = Math.max(400, TELEGRAPH_MS_BASE - levelIdx * 40);
+            this.attackZone = null;
+
+            this.wobble = 0;
+        }
+
+        update(dt) {
+            this.wobble += dt;
+
+            // การเคลื่อนที่สุ่มโซน
+            this.moveTimer -= dt;
+            if (this.moveTimer <= 0) {
+                let newIdx = this.zoneIdx;
+                while (newIdx === this.zoneIdx) newIdx = Math.floor(Math.random() * 3);
+                this.zoneIdx = newIdx;
+                this.zone = this.zones[this.zoneIdx];
+                this.moveTimer = Math.random() * 1400 + 900 - this.level * 30;
+            }
+
+            // ระบบโจมตี: เตือนก่อน แล้วค่อยลงดาเมจถ้าผู้เล่นไม่หลบ
+            if (this.attackState === 'none') {
+                this.attackCooldown -= dt;
+                if (this.attackCooldown <= 0) {
+                    this.attackState = 'telegraph';
+                    this.attackZone = this.zone; // โจมตีโซนที่มันยืนอยู่ตอนเตือน
+                    this.telegraphTimer = this.telegraphDuration;
+                    sfx.telegraph();
+                }
+            } else if (this.attackState === 'telegraph') {
+                this.telegraphTimer -= dt;
+                if (this.telegraphTimer <= 0) {
+                    this.resolveAttack();
+                }
+            }
+        }
+
+        resolveAttack() {
+            this.attackState = 'none';
+            this.attackCooldown = 2600 + Math.random() * 1600 - this.level * 60;
+            if (targetZone === this.attackZone) {
+                // ผู้เล่นไม่ได้หลบออกจากโซนอันตราย -> โดนดาเมจ
+                takeDamage(ENEMY_DAMAGE[this.level]);
+            }
+            this.attackZone = null;
+        }
+
+        getXPos() {
+            if (this.zone === 'left') return gameCanvas.width / 4;
+            if (this.zone === 'right') return (3 * gameCanvas.width) / 4;
+            return gameCanvas.width / 2;
+        }
+
+        draw(ctx) {
+            const xPos = this.getXPos();
+            const yPos = gameCanvas.height / 3;
+            const bob = Math.sin(this.wobble / 220) * 6;
+
+            // วงแหวนเตือนโจมตี (telegraph) เรืองแดงและหดตัวลงเรื่อยๆ
+            if (this.attackState === 'telegraph') {
+                const progress = this.telegraphTimer / this.telegraphDuration; // 1 -> 0
+                const radius = 70 * progress + 20;
+                ctx.save();
+                ctx.strokeStyle = DANGER_COLOR;
+                ctx.globalAlpha = 0.5 + 0.5 * Math.sin(this.wobble / 60);
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                ctx.arc(xPos, yPos, radius, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.restore();
+
+                ctx.fillStyle = DANGER_COLOR;
+                ctx.font = 'bold 28px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('!', xPos, yPos - 90);
+            }
+
+            // Sprite ศัตรู
+            ctx.font = '72px serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(this.sprite, xPos, yPos + bob);
+
+            // แถบเลือดศัตรู
+            const hpWidth = 84, hpHeight = 10;
+            ctx.fillStyle = WALL_COLOR;
+            ctx.fillRect(xPos - hpWidth / 2, yPos + 60, hpWidth, hpHeight);
+            ctx.fillStyle = DANGER_COLOR;
+            ctx.fillRect(xPos - hpWidth / 2, yPos + 60, Math.max(0, this.hp / this.maxHp) * hpWidth, hpHeight);
+            ctx.strokeStyle = LIGHT_COLOR;
+            ctx.lineWidth = 2;
+            ctx.strokeRect(xPos - hpWidth / 2, yPos + 60, hpWidth, hpHeight);
+        }
+    }
+
+    // ==================== Core Game Functions ====================
+    function initGame() {
+        level = 1;
+        score = 0;
+        playerHealth = PLAYER_MAX_HEALTH;
+        playerAmmo = PLAYER_MAX_AMMO;
+        gameState = 'start';
+        resizeCanvas();
+        updateUI();
+    }
+
+    function resizeCanvas() {
+        gameCanvas.width = window.innerWidth;
+        gameCanvas.height = window.innerHeight;
+        buildDungeonTexture(); // ต้องสร้างลายใหม่เมื่อขนาดจอเปลี่ยน
+    }
+
+    function startLevel() {
+        enemy = new Enemy(level - 1);
+        gameState = 'playing';
+        timeLeft = TIME_LIMIT_PER_LEVEL;
+        rewardScreen.classList.add('hidden');
+        gameOverScreen.classList.add('hidden');
+        winScreen.classList.add('hidden');
+        uiOverlay.classList.remove('hidden');
+        timerEl.classList.remove('low-time');
+
+        clearInterval(timerInterval);
+        timerInterval = setInterval(() => {
+            timeLeft -= 1;
+            if (timeLeft <= 10) timerEl.classList.add('low-time');
+            if (timeLeft <= 0) {
+                timeLeft = 0;
+                updateTimerDisplay();
+                gameOver('หมดเวลา! เอาชนะศัตรูไม่ทันในด่านที่ ' + level);
+                return;
+            }
+            updateTimerDisplay();
+        }, 1000);
+
+        cancelAnimationFrame(rafHandle);
+        rafHandle = requestAnimationFrame(gameLoop);
+    }
+
+    function gameLoop(currentTime) {
+        if (gameState !== 'playing') return;
+
+        // พื้นหลังแคชไว้แล้ว วาดครั้งเดียวต่อเฟรมแบบ drawImage (ไม่สุ่มใหม่ทุกเฟรม)
+        ctx.fillStyle = BG_COLOR;
+        ctx.fillRect(0, 0, gameCanvas.width, gameCanvas.height);
+        if (dungeonTextureCanvas) ctx.drawImage(dungeonTextureCanvas, 0, 0);
+
+        drawZoneLanes(ctx);
+
+        if (enemy) {
+            enemy.update(1000 / 60);
+            enemy.draw(ctx);
+
+            if (playerAmmo > 0 && currentTime - lastShootTime > shootDelay && targetZone === enemy.zone) {
+                hitEnemy();
+                lastShootTime = currentTime;
+            }
+        }
+
+        drawPlayerCrosshair(ctx, targetZone);
+        drawFlashEffects(ctx);
+        updateHandWarning();
+        updateUI();
+
+        rafHandle = requestAnimationFrame(gameLoop);
+    }
+
+    // สร้างลายอิฐดันเจี้ยนครั้งเดียว แคชไว้ใน canvas แยก (ประหยัด performance, ไม่กระพริบสุ่มทุกเฟรม)
+    function buildDungeonTexture() {
+        dungeonTextureCanvas = document.createElement('canvas');
+        dungeonTextureCanvas.width = gameCanvas.width;
+        dungeonTextureCanvas.height = gameCanvas.height;
+        const tctx = dungeonTextureCanvas.getContext('2d');
+        tctx.fillStyle = WALL_COLOR;
+        const brickW = 20, brickH = 10, gap = 2;
+        for (let y = 0; y < dungeonTextureCanvas.height; y += brickH + gap) {
+            for (let x = (Math.round(y / (brickH + gap)) % 2 === 0 ? 0 : brickW / 2); x < dungeonTextureCanvas.width; x += brickW + gap) {
+                if (Math.random() > 0.08) {
+                    tctx.fillRect(x, y, brickW, brickH);
+                }
+            }
+        }
+    }
+
+    // เลนแสดงโซนซ้าย/กลาง/ขวา ให้ผู้เล่นเห็นตำแหน่งมือของตัวเอง
+    function drawZoneLanes(ctx) {
+        const zones = ['left', 'middle', 'right'];
+        const laneWidth = gameCanvas.width / 3;
+        zones.forEach((z, i) => {
+            const xStart = i * laneWidth;
+            ctx.save();
+            if (z === targetZone) {
+                ctx.strokeStyle = LIGHT_COLOR;
+                ctx.globalAlpha = 0.35;
+                ctx.lineWidth = 3;
+                ctx.strokeRect(xStart + 3, 3, laneWidth - 6, gameCanvas.height - 6);
+            } else {
+                ctx.strokeStyle = LIGHT_COLOR;
+                ctx.globalAlpha = 0.08;
+                ctx.lineWidth = 1;
+                ctx.strokeRect(xStart, 0, laneWidth, gameCanvas.height);
+            }
+            ctx.restore();
+        });
+    }
+
+    function drawPlayerCrosshair(ctx, zone) {
+        let xPos;
+        if (zone === 'left') xPos = gameCanvas.width / 4;
+        else if (zone === 'right') xPos = (3 * gameCanvas.width) / 4;
+        else xPos = gameCanvas.width / 2;
+
+        const size = 30;
+        ctx.strokeStyle = LIGHT_COLOR;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(xPos - size / 2, gameCanvas.height / 3);
+        ctx.lineTo(xPos + size / 2, gameCanvas.height / 3);
+        ctx.moveTo(xPos, gameCanvas.height / 3 - size / 2);
+        ctx.lineTo(xPos, gameCanvas.height / 3 + size / 2);
+        ctx.stroke();
+
+        // เส้นกระสุนวาบตอนยิงโดน
+        if (shootFlashTimer > 0) {
+            ctx.save();
+            ctx.strokeStyle = GOLD_COLOR;
+            ctx.globalAlpha = shootFlashTimer / 150;
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.moveTo(xPos, gameCanvas.height - 40);
+            ctx.lineTo(xPos, gameCanvas.height / 3);
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        ctx.font = '64px serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText('🔫', xPos, gameCanvas.height - 20);
+    }
+
+    function drawFlashEffects(ctx) {
+        if (shootFlashTimer > 0) shootFlashTimer -= 1000 / 60;
+        if (hurtFlashTimer > 0) {
+            hurtFlashTimer -= 1000 / 60;
+            ctx.save();
+            ctx.fillStyle = DANGER_COLOR;
+            ctx.globalAlpha = Math.min(0.35, hurtFlashTimer / 300);
+            ctx.fillRect(0, 0, gameCanvas.width, gameCanvas.height);
+            ctx.restore();
+        }
+    }
+
+    function updateHandWarning() {
+        const now = performance.now();
+        if (now - lastHandSeenAt > 1200) {
+            handWarning.style.display = 'block';
+        } else {
+            handWarning.style.display = 'none';
+        }
+    }
+
+    function hitEnemy() {
+        if (!enemy || playerAmmo <= 0) return;
+        playerAmmo -= 1;
+        enemy.hp -= HIT_DAMAGE_TO_ENEMY;
+        shootFlashTimer = 150;
+        sfx.shoot();
+
+        if (enemy.hp <= 0) {
+            sfx.kill();
+            killEnemy();
+        } else {
+            sfx.hit();
+        }
+        updateUI();
+    }
+
+    function takeDamage(amount) {
+        if (gameState !== 'playing') return;
+        playerHealth = Math.max(0, playerHealth - amount);
+        hurtFlashTimer = 300;
+        sfx.hurt();
+        updateUI();
+        if (playerHealth <= 0) {
+            gameOver('พลังชีวิตหมด! ศัตรูเอาชนะเจ้าในด่านที่ ' + level);
+        }
+    }
+
+    function killEnemy() {
+        score += SCORE_PER_KILL[level - 1];
+        enemy = null;
+        clearInterval(timerInterval);
+
+        if (level >= TOTAL_LEVELS) {
+            gameWin();
+        } else {
+            showRewardScreen();
+        }
+    }
+
+    function showRewardScreen() {
+        gameState = 'reward';
+        document.getElementById('reward-level').innerText = level;
+        rewardScreen.classList.remove('hidden');
+    }
+
+    function applyReward(type) {
+        if (type === 'health') {
+            playerHealth = Math.min(PLAYER_MAX_HEALTH, playerHealth + 50);
+        } else if (type === 'ammo') {
+            playerAmmo = Math.min(PLAYER_MAX_AMMO, playerAmmo + 10);
+        }
+        sfx.levelUp();
+        level += 1;
+        startLevel();
+    }
+
+    function gameOver(message) {
+        gameState = 'gameover';
+        clearInterval(timerInterval);
+        cancelAnimationFrame(rafHandle);
+        sfx.lose();
+        document.getElementById('game-over-msg').innerText = message;
+        document.getElementById('final-score').innerText = score;
+        uiOverlay.classList.add('hidden');
+        gameOverScreen.classList.remove('hidden');
+    }
+
+    function gameWin() {
+        gameState = 'win';
+        clearInterval(timerInterval);
+        cancelAnimationFrame(rafHandle);
+        sfx.win();
+        document.getElementById('win-score').innerText = score;
+        uiOverlay.classList.add('hidden');
+        winScreen.classList.remove('hidden');
+    }
+
+    // เริ่มเกมใหม่ตั้งแต่ด่าน 1 โดยไม่ต้องขอสิทธิ์กล้องใหม่ (ไม่ reload หน้า)
+    function restartGame() {
+        gameOverScreen.classList.add('hidden');
+        winScreen.classList.add('hidden');
+        initGame();
+        startLevel();
+    }
+
+    // ==================== UI Update ====================
+    function updateUI() {
+        levelDisplay.innerText = level;
+        scoreDisplay.innerText = score;
+        healthBarFill.style.width = (playerHealth / PLAYER_MAX_HEALTH) * 100 + '%';
+        ammoBarFill.style.width = (playerAmmo / PLAYER_MAX_AMMO) * 100 + '%';
+        updateTimerDisplay();
+    }
+
+    function updateTimerDisplay() {
+        timeLeftDisplay.innerText = timeLeft;
+    }
+
+    // ==================== Hand Input Handling ====================
+    function onHandsResults(results) {
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            lastHandSeenAt = performance.now();
+            const hand = results.multiHandLandmarks[0];
+            let x = hand[0].x; // WRIST landmark, normalized 0-1
+            if (MIRROR_X) x = 1 - x; // ทำให้รู้สึกเหมือนมองกระจก ใช้งานง่ายกว่า
+
+            if (x < ZONE_BOUNDARY_LEFT) targetZone = 'left';
+            else if (x > ZONE_BOUNDARY_RIGHT) targetZone = 'right';
+            else targetZone = 'middle';
+        }
+    }
+    hands.onResults(onHandsResults);
+
+    const camera = new Camera(videoElement, {
+        onFrame: async () => { await hands.send({ image: videoElement }); },
+        width: 640,
+        height: 480,
+        facingMode: 'user'
+    });
+
+    // ==================== Event Listeners ====================
+    document.getElementById('start-btn').onclick = () => {
+        ensureAudio();
+        startScreen.classList.add('hidden');
+        camera.start().then(() => {
+            initGame();
+            startLevel();
+        }).catch(err => {
+            alert('ไม่สามารถเปิดกล้องได้: ' + err + '\nกรุณาอนุญาตการใช้กล้องแล้วลองใหม่');
+            startScreen.classList.remove('hidden');
+        });
+    };
+
+    document.getElementById('reward-health').onclick = () => applyReward('health');
+    document.getElementById('reward-ammo').onclick = () => applyReward('ammo');
+    document.getElementById('restart-btn').onclick = restartGame;
+    document.getElementById('restart-btn-win').onclick = restartGame;
+
+    window.addEventListener('resize', () => {
+        if (gameState !== 'init') resizeCanvas();
+    });
+</script>
+</body>
+</html>
